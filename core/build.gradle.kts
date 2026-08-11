@@ -23,6 +23,7 @@ kotlin {
             implementation("io.ktor:ktor-client-cio:3.5.2")
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
             implementation("com.fleeksoft.ksoup:ksoup-network:0.2.6")
+            implementation("at.released.tempfolder:tempfolder-sync:0.1")
         }
     }
 }
