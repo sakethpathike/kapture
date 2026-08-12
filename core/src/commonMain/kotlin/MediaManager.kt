@@ -9,6 +9,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.io.buffered
 import kotlinx.io.files.Path
 import kotlinx.io.files.SystemFileSystem
+import kotlinx.io.readString
 import kotlin.uuid.Uuid
 
 internal typealias FileName = String
@@ -18,30 +19,71 @@ internal typealias MediaUrl = String
 internal class MediaManager(private val document: Document, private val httpClient: HttpClient) {
     private val urls = mutableSetOf<String>()
     private val tempDirectory = createTempDirectory()
+    private val cssUrls = mutableSetOf<String>()
 
     init {
         loadUrlsFromDocument()
     }
 
-    suspend fun downloadMediaToTempFiles(): HashMap<FileName, MediaUrl> = withContext(PlatformIODispatcher) {
-        val fileMediaMap = HashMap<FileName, MediaUrl>()
-        urls.forEach { url ->
+    suspend fun downloadMediaToTempFiles(): HashMap<MediaUrl, FileName> = withContext(PlatformIODispatcher) {
+        val fileMediaMap = HashMap<MediaUrl, FileName>()
+        val queue = ArrayDeque<String>().apply { addAll(urls) }
+        val visited = mutableSetOf<String>().apply { addAll(urls) }
+        val basePath = tempDirectory.absolutePath().asString()
+
+        while (queue.isNotEmpty()) {
+            val url = queue.removeFirst()
             val opName = Uuid.random().toHexString()
-            val filePath = Path(base = tempDirectory.absolutePath().asString(), opName)
-            fileMediaMap[url] = tempDirectory.absolutePath().asString() + "/$opName"
+            val filePathString = "$basePath/$opName"
+            val filePath = Path(filePathString)
 
             val tempMediaFile = SystemFileSystem.sink(filePath).buffered()
-            httpClient.get(urlString = url).bodyAsChannel().copyTo(tempMediaFile.asByteWriteChannel())
-            tempMediaFile.close()
-        }
+            var downloadSucceeded = false
 
+            try {
+                val response = httpClient.get(urlString = url)
+                if (response.status.value in 200..299) {
+                    response.bodyAsChannel().copyTo(tempMediaFile.asByteWriteChannel())
+                    downloadSucceeded = true
+                }
+            } catch (_: Exception) {
+            } finally {
+                tempMediaFile.close()
+            }
+
+            if (!downloadSucceeded) {
+                runCatching { SystemFileSystem.delete(filePath) }
+                continue
+            }
+            fileMediaMap[url] = filePathString
+            if (url in cssUrls) {
+                try {
+                    val cssText = SystemFileSystem.source(filePath).buffered().use { it.readString() }
+                    CSS_URL_REGEX.findAll(cssText).forEach { match ->
+                        val rawUrl = match.groupValues[2].trim()
+                        if (rawUrl.isNotEmpty() && !rawUrl.startsWith("data:") && !rawUrl.startsWith("#")) {
+                            val absoluteUrl = resolveUrl(url, rawUrl)
+                            if (visited.add(absoluteUrl)) {
+                                queue.addLast(absoluteUrl)
+                                val pathWithoutQuery = absoluteUrl.substringBefore('?').substringBefore('#')
+                                if (pathWithoutQuery.substringAfterLast('.', "").lowercase() == "css") {
+                                    cssUrls.add(absoluteUrl)
+                                }
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                    // we dont care, readString or the regex finaAll went crazy
+                }
+            }
+        }
         return@withContext fileMediaMap
     }
 
     private fun loadUrlsFromDocument() {
         val mediaElements = document.select(
             "img[src], img[srcset], source[src], source[srcset], video[src], " +
-                    "video[poster], audio[src], track[src], embed[src], object[data]"
+                    "video[poster], audio[src], track[src], embed[src], object[data], link[href]"
         )
 
         mediaElements.forEach { mediaElement ->
@@ -62,6 +104,17 @@ internal class MediaManager(private val document: Document, private val httpClie
 
                 "object" -> {
                     addAttribute(mediaElement, "data")
+                }
+
+                "link" -> {
+                    val rel = mediaElement.attr("rel").lowercase()
+                    val href = mediaElement.absUrl("href").ifEmpty { mediaElement.attr("href") }
+                    if (rel.contains("stylesheet")) {
+                        addUrl(href)
+                        cssUrls.add(href)
+                    } else if (rel.contains("icon")) {
+                        addUrl(href)
+                    }
                 }
             }
         }
@@ -95,16 +148,20 @@ internal class MediaManager(private val document: Document, private val httpClie
         val srcset = element.attr("srcset")
         if (srcset.isBlank()) return
 
-        // srcset="small.jpg 480w, medium.jpg 800w, large.jpg 1200w"
+        val baseUrl = element.baseUri()
+
         srcset.split(",").forEach { candidate ->
             val trimmedCandidate = candidate.trim()
             if (trimmedCandidate.isEmpty()) return@forEach
 
-            val url = trimmedCandidate
+            val rawUrl = trimmedCandidate
                 .split(Regex("\\s+"))
                 .firstOrNull()
+                ?.trim()
 
-            addUrl(url)
+            if (!rawUrl.isNullOrEmpty()) {
+                addUrl(resolveUrl(baseUrl, rawUrl))
+            }
         }
     }
 
