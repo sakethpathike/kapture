@@ -1,7 +1,7 @@
 import at.released.tempfolder.sync.createTempDirectory
 import com.fleeksoft.ksoup.nodes.Document
 import com.fleeksoft.ksoup.nodes.Element
-import io.ktor.client.HttpClient
+import io.ktor.client.*
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.utils.io.*
@@ -14,10 +14,10 @@ import kotlin.uuid.Uuid
 internal typealias FileName = String
 internal typealias MediaUrl = String
 
-private val tempDirectory = createTempDirectory()
 
 internal class MediaManager(private val document: Document, private val httpClient: HttpClient) {
     private val urls = mutableSetOf<String>()
+    private val tempDirectory = createTempDirectory()
 
     init {
         loadUrlsFromDocument()
@@ -106,5 +106,10 @@ internal class MediaManager(private val document: Document, private val httpClie
 
             addUrl(url)
         }
+    }
+
+    suspend fun cleanup() = withContext(PlatformIODispatcher) {
+        tempDirectory.delete()
+        tempDirectory.close()
     }
 }
