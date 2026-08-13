@@ -260,14 +260,31 @@ internal class Serialization {
         return stringBuilder.toString()
     }
 
-    private fun writeBase64(tempFileName: String, destinationFile: RawSink) {
-        val base64String = SystemFileSystem.source(Path(tempFileName)).asInputStream().use {
-            Base64.encode(
-                source = it.readAllBytes(),
-            )
+    private fun streamBase64(streamSize: Int, tempFileName: String, destinationFile: RawSink) {
+        // streamSize must be a multiple of 3 to prevent padding
+        // good stuff: https://stackoverflow.com/questions/4080988/why-does-base64-encoding-require-padding-if-the-input-length-is-not-divisible-by
+        require(streamSize % 3 == 0) {
+            "streamSize must be multiple of 3"
         }
-        destinationFile.write(base64String)
+
+        SystemFileSystem.source(tempFileName.toPath()).buffered().use { source ->
+            // we dont use .use here. we dont want to close the underlying destinationFile
+            val sink = destinationFile.buffered()
+
+            while (source.request(streamSize.toLong())) {
+                val chunkBytes = source.readByteArray(streamSize)
+                sink.writeString(Base64.encode(chunkBytes))
+            }
+
+            val remainingBytes = source.readByteArray()
+            if (remainingBytes.isNotEmpty()) {
+                sink.writeString(Base64.encode(remainingBytes))
+            }
+
+            sink.flush()
+        }
     }
+
 
     private fun processCss(
         cssText: String,
