@@ -1,3 +1,5 @@
+package io.github.sakethpathike.kapture
+
 import at.released.tempfolder.sync.createTempDirectory
 import com.fleeksoft.ksoup.nodes.Document
 import com.fleeksoft.ksoup.nodes.Element
@@ -10,13 +12,15 @@ import kotlinx.io.buffered
 import kotlinx.io.files.Path
 import kotlinx.io.files.SystemFileSystem
 import kotlinx.io.readString
+import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
 
 internal typealias FileName = String
 internal typealias MediaUrl = String
 
-
-internal class MediaManager(private val document: Document, private val httpClient: HttpClient) {
+internal class MediaManager(
+    private val document: Document, private val httpClient: HttpClient, private val options: Kapture.Options
+) {
     private val urls = mutableSetOf<String>()
     private val tempDirectory = createTempDirectory()
     private val cssUrls = mutableSetOf<String>()
@@ -33,7 +37,10 @@ internal class MediaManager(private val document: Document, private val httpClie
 
         while (queue.isNotEmpty()) {
             val url = queue.removeFirst()
+
+            @OptIn(ExperimentalUuidApi::class)
             val opName = Uuid.random().toHexString()
+
             val filePathString = "$basePath/$opName"
             val filePath = Path(filePathString)
 
@@ -55,7 +62,9 @@ internal class MediaManager(private val document: Document, private val httpClie
                 runCatching { SystemFileSystem.delete(filePath) }
                 continue
             }
+
             fileMediaMap[url] = filePathString
+
             if (url in cssUrls) {
                 try {
                     val cssText = SystemFileSystem.source(filePath).buffered().use { it.readString() }
@@ -73,7 +82,6 @@ internal class MediaManager(private val document: Document, private val httpClie
                         }
                     }
                 } catch (_: Exception) {
-                    // we dont care, readString or the regex finaAll went crazy
                 }
             }
         }
@@ -82,24 +90,28 @@ internal class MediaManager(private val document: Document, private val httpClie
 
     private fun loadUrlsFromDocument() {
         val mediaElements = document.select(
-            "img[src], img[srcset], source[src], source[srcset], video[src], " +
-                    "video[poster], audio[src], track[src], embed[src], object[data], link[href]"
+            "img[src], img[srcset], source[src], source[srcset], video[src], " + "video[poster], audio[src], track[src], embed[src], object[data], link[href]"
         )
-
         mediaElements.forEach { mediaElement ->
             when (mediaElement.tagName().lowercase()) {
                 "img", "source" -> {
-                    addAttribute(mediaElement, "src")
-                    addSrcset(mediaElement)
+                    if (options.includeImages) {
+                        addAttribute(mediaElement, "src")
+                        addSrcset(mediaElement)
+                    }
                 }
 
                 "video" -> {
-                    addAttribute(mediaElement, "src")
-                    addAttribute(mediaElement, "poster")
+                    if (options.includeVideo) {
+                        addAttribute(mediaElement, "src")
+                        addAttribute(mediaElement, "poster")
+                    }
                 }
 
                 "audio", "track", "embed" -> {
-                    addAttribute(mediaElement, "src")
+                    if (options.includeAudio) {
+                        addAttribute(mediaElement, "src")
+                    }
                 }
 
                 "object" -> {
@@ -110,10 +122,14 @@ internal class MediaManager(private val document: Document, private val httpClie
                     val rel = mediaElement.attr("rel").lowercase()
                     val href = mediaElement.absUrl("href").ifEmpty { mediaElement.attr("href") }
                     if (rel.contains("stylesheet")) {
-                        addUrl(href)
-                        cssUrls.add(href)
+                        if (options.includeCss) {
+                            addUrl(href)
+                            cssUrls.add(href)
+                        }
                     } else if (rel.contains("icon")) {
-                        addUrl(href)
+                        if (options.includeImages) {
+                            addUrl(href)
+                        }
                     }
                 }
             }
@@ -122,7 +138,6 @@ internal class MediaManager(private val document: Document, private val httpClie
 
     private fun addUrl(raw: String?) {
         val url = raw?.trim().orEmpty()
-
         if (url.isEmpty()) return
         if (url.startsWith("#")) return
         if (url.startsWith("data:", ignoreCase = true)) return
@@ -130,13 +145,11 @@ internal class MediaManager(private val document: Document, private val httpClie
         if (url.startsWith("javascript:", ignoreCase = true)) return
         if (url.startsWith("mailto:", ignoreCase = true)) return
         if (url.startsWith("tel:", ignoreCase = true)) return
-
         urls.add(url)
     }
 
     private fun addAttribute(element: Element, attr: String) {
         val absolute = element.absUrl(attr)
-
         if (absolute.isNotBlank()) {
             addUrl(absolute)
         } else {
@@ -147,18 +160,11 @@ internal class MediaManager(private val document: Document, private val httpClie
     private fun addSrcset(element: Element) {
         val srcset = element.attr("srcset")
         if (srcset.isBlank()) return
-
         val baseUrl = element.baseUri()
-
         srcset.split(",").forEach { candidate ->
             val trimmedCandidate = candidate.trim()
             if (trimmedCandidate.isEmpty()) return@forEach
-
-            val rawUrl = trimmedCandidate
-                .split(Regex("\\s+"))
-                .firstOrNull()
-                ?.trim()
-
+            val rawUrl = trimmedCandidate.split(Regex("\\s+")).firstOrNull()?.trim()
             if (!rawUrl.isNullOrEmpty()) {
                 addUrl(resolveUrl(baseUrl, rawUrl))
             }

@@ -1,26 +1,28 @@
-import io.ktor.http.URLBuilder
-import io.ktor.http.takeFrom
+package io.github.sakethpathike.kapture
+
+import io.ktor.http.*
 import kotlinx.io.Buffer
 import kotlinx.io.RawSink
 import kotlinx.io.files.Path
 import kotlinx.io.writeString
 
-fun RawSink.write(string: String) {
+internal fun RawSink.write(string: String) {
     val buffer = Buffer()
     buffer.writeString(string)
     this.write(source = buffer, byteCount = buffer.size)
 }
 
-fun String.toPath(): Path = Path(this)
+internal fun String.toPath(): Path = Path(this)
 
-fun resolveUrl(baseUrl: String, relativeUrl: String): String {
+internal fun resolveUrl(baseUrl: String, relativeUrl: String): String {
     val trimmed = relativeUrl.trim()
     if (trimmed.isEmpty()) return trimmed
 
     val lower = trimmed.lowercase()
-    if (lower.startsWith("data:") || lower.startsWith("#") ||
-        lower.startsWith("mailto:") || lower.startsWith("tel:") ||
-        lower.startsWith("javascript:") || lower.startsWith("blob:")) {
+    if (lower.startsWith("data:") || lower.startsWith("#") || lower.startsWith("mailto:") || lower.startsWith("tel:") || lower.startsWith(
+            "javascript:"
+        ) || lower.startsWith("blob:")
+    ) {
         return trimmed
     }
 
@@ -33,16 +35,12 @@ fun resolveUrl(baseUrl: String, relativeUrl: String): String {
     }
 }
 
-val CSS_URL_REGEX = Regex(
-    """url\(\s*(['"]?)([\s\S]*?)\1\s*\)""",
-    RegexOption.IGNORE_CASE
+internal val CSS_URL_REGEX = Regex(
+    """url\(\s*(['"]?)([\s\S]*?)\1\s*\)""", RegexOption.IGNORE_CASE
 )
 
-fun getMimeType(urlOrPath: String): String {
-    val path = urlOrPath
-        .substringBefore('?')
-        .substringBefore('#')
-        .substringAfterLast('/')
+internal fun getMimeType(urlOrPath: String): String {
+    val path = urlOrPath.substringBefore('?').substringBefore('#').substringAfterLast('/')
     val ext = path.substringAfterLast('.', "").lowercase()
 
     return when (ext) {
@@ -82,3 +80,5 @@ fun getMimeType(urlOrPath: String): String {
         else -> "application/octet-stream"
     }
 }
+
+internal const val INIT_REQUIRED_MSG = "Kapture must be initialized, call Kapture#init before archiving"
