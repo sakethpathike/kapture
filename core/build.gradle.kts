@@ -1,29 +1,102 @@
+@file:OptIn(ExperimentalWasmDsl::class)
+
+import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
+
 plugins {
     alias(libs.plugins.multiplatform)
+    alias(libs.plugins.android.library)
 }
 
 group = "io.github.sakethpathike"
 version = "0.1.2"
 
 kotlin {
+    jvmToolchain(17)
+    applyDefaultHierarchyTemplate()
+
+    androidTarget()
     jvm()
-    js { browser() }
-    wasmJs { browser() }
+
+    js {
+        browser()
+    }
+
+    wasmJs {
+        browser()
+    }
+
     iosX64()
     iosArm64()
     iosSimulatorArm64()
-    macosX64()
     macosArm64()
     linuxX64()
     mingwX64()
 
     sourceSets {
-        commonMain.dependencies {
-            implementation("io.ktor:ktor-client-core:3.5.2")
-            implementation("io.ktor:ktor-client-cio:3.5.2")
-            implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
-            implementation("com.fleeksoft.ksoup:ksoup-network:0.2.6")
-            implementation("at.released.tempfolder:tempfolder-sync:0.1")
+        val commonMain by getting {
+            dependencies {
+                implementation(libs.kotlinx.coroutines.core)
+                implementation(libs.ktor.client.core)
+                implementation(libs.ksoup.network)
+                implementation(libs.tempfolder.sync)
+            }
         }
+
+        val androidMain by getting {
+            dependencies {
+                implementation(libs.kotlinx.coroutines.android)
+                implementation(libs.ktor.client.okhttp)
+            }
+        }
+
+        val jvmMain by getting {
+            dependencies {
+                implementation(libs.ktor.client.cio)
+            }
+        }
+
+        val jsMain by getting {
+            dependencies {
+                implementation(libs.ktor.client.js)
+            }
+        }
+
+        val wasmJsMain by getting {
+            dependencies {
+                implementation(libs.ktor.client.wasm.js)
+            }
+        }
+
+        val appleMain by getting {
+            dependencies {
+                implementation(libs.ktor.client.darwin)
+            }
+        }
+
+        val linuxMain by getting {
+            dependencies {
+                implementation(libs.ktor.client.cio)
+            }
+        }
+
+        val mingwMain by getting {
+            dependencies {
+                implementation(libs.ktor.client.winhttp)
+            }
+        }
+    }
+}
+
+android {
+    namespace = "io.github.sakethpathike"
+    compileSdk = 36
+
+    defaultConfig {
+        minSdk = 21
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 }
