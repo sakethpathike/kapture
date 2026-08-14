@@ -1,6 +1,5 @@
 plugins {
     alias(libs.plugins.multiplatform)
-    alias(libs.plugins.android.library)
 }
 
 group = "io.github.sakethpathike"
@@ -10,7 +9,6 @@ kotlin {
     jvmToolchain(17)
     applyDefaultHierarchyTemplate()
 
-    androidTarget()
     jvm()
 
     js {
@@ -34,16 +32,4 @@ kotlin {
     }
 }
 
-android {
-    namespace = "io.github.sakethpathike.shared"
-    compileSdk = 36
-
-    defaultConfig {
-        minSdk = 21
-    }
-
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-}
+tasks.register("prepareKotlinBuildScriptModel") {}
