@@ -22,7 +22,9 @@ internal class MediaManager(
     private val document: Document, private val httpClient: HttpClient, private val options: Options
 ) {
     private val urls = mutableSetOf<String>()
-    private val tempDirectory = createTempDirectory()
+    private val tempDirectory = createTempDirectory().apply {
+        deleteOnClose = true
+    }
     private val cssUrls = mutableSetOf<String>()
 
     init {
@@ -172,7 +174,6 @@ internal class MediaManager(
     }
 
     suspend fun cleanup() = withContext(PlatformIODispatcher) {
-        tempDirectory.delete()
         tempDirectory.close()
     }
 }
