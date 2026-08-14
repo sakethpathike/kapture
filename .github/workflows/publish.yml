@@ -1,0 +1,256 @@
+name: Publish and Release Binaries
+
+on:
+  release:
+    types: [released, prereleased]
+
+jobs:
+  maven:
+    name: Publish to Maven Central
+    runs-on: macos-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: 21
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Publish and release to Maven Central
+        run: ./gradlew publishAndReleaseToMavenCentral --no-configuration-cache
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ secrets.SIGNING_KEY_ID }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.GPG_KEY_CONTENTS }}
+
+  build-linux-x64:
+    name: Build Linux x64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: 21
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openjdk-21-jdk gcc g++ pkg-config \
+            libfontconfig1-dev libfreetype-dev libpng-dev libgl-dev libegl-dev \
+            libdbus-1-dev libwayland-dev libx11-dev zip upx build-essential zlib1g-dev
+          wget -q http://archive.ubuntu.com/ubuntu/pool/universe/libs/libsdl3/libsdl3-0_3.2.20+ds-2_amd64.deb
+          wget -q http://archive.ubuntu.com/ubuntu/pool/universe/libs/libsdl3/libsdl3-dev_3.2.20+ds-2_amd64.deb
+          sudo dpkg -i ./libsdl3-0_*.deb ./libsdl3-dev_*.deb || true
+          sudo apt-get install -y -f
+
+      - name: Build and Compress
+        run: |
+          for lib in SDL3 fontconfig freetype png16 dbus-1 wayland-client X11 z; do
+            found=$(find /usr/lib/x86_64-linux-gnu -name "lib${lib}.so*" -type f 2>/dev/null | head -n 1)
+            if [ -n "$found" ]; then
+              sudo rm -f "/usr/lib/lib${lib}.so"
+              sudo cp "$found" "/usr/lib/lib${lib}.so"
+            fi
+          done
+          found_gl=$(find /usr/lib/x86_64-linux-gnu -name "libGL.so*" -type f 2>/dev/null | head -n 1)
+          if [ -n "$found_gl" ]; then
+            sudo rm -f "/usr/lib/libGL.so"
+            sudo cp "$found_gl" "/usr/lib/libGL.so"
+          fi
+          found_egl=$(find /usr/lib/x86_64-linux-gnu -name "libEGL.so*" -type f 2>/dev/null | head -n 1)
+          if [ -n "$found_egl" ]; then
+            sudo rm -f "/usr/lib/libEGL.so"
+            sudo cp "$found_egl" "/usr/lib/libEGL.so"
+          fi
+          
+          cd app
+          ./gradlew linkReleaseExecutableLinuxX64
+          
+          cp build/bin/linuxX64/releaseExecutable/app.kexe ../kapture-linux-x64
+          cp ../kapture-linux-x64 ../kapture-linux-x64-upx
+          upx --best --lzma ../kapture-linux-x64-upx
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64-artifacts
+          path: |
+            kapture-linux-x64
+            kapture-linux-x64-upx
+
+  build-linux-arm64:
+    name: Build Linux Arm64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: 21
+
+      - name: Install Dependencies
+        run: |
+          sudo dpkg --add-architecture arm64
+          sudo sed -i '/^URIs:/a Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources || true
+          printf "Types: deb\nURIs: http://ports.ubuntu.com/ubuntu-ports\nSuites: noble noble-updates noble-backports noble-security\nComponents: main universe restricted multiverse\nArchitectures: arm64\n" | sudo tee /etc/apt/sources.list.d/arm64.sources
+          sudo apt-get update
+          sudo apt-get install -y openjdk-21-jdk zip upx build-essential \
+            gcc-aarch64-linux-gnu libfontconfig1-dev:arm64 libfreetype-dev:arm64 \
+            libpng-dev:arm64 libgl-dev:arm64 libegl-dev:arm64 libdbus-1-dev:arm64 \
+            libwayland-dev:arm64 libx11-dev:arm64 zlib1g-dev:arm64
+          wget -q http://ports.ubuntu.com/pool/universe/libs/libsdl3/libsdl3-0_3.2.20+ds-2_arm64.deb
+          wget -q http://ports.ubuntu.com/pool/universe/libs/libsdl3/libsdl3-dev_3.2.20+ds-2_arm64.deb
+          sudo dpkg -i ./libsdl3-0_*_arm64.deb ./libsdl3-dev_*_arm64.deb || true
+          sudo apt-get install -y -f
+
+      - name: Build and Compress
+        run: |
+          cd app
+          ./gradlew compileKotlinLinuxArm64 --quiet
+          cd ..
+          
+          KONAN_ARM64_SYSROOT=$(find ~/.konan/dependencies -type d -name "sysroot" -path "*aarch64*" 2>/dev/null | head -n 1)
+          
+          if [ -z "$KONAN_ARM64_SYSROOT" ]; then
+            echo "ERROR: Konan arm64 sysroot was not downloaded!"
+            exit 1
+          fi
+          
+          mkdir -p "$KONAN_ARM64_SYSROOT/lib"
+          
+          # -type f ensures we grab the actual binary file, ignoring any existing unversioned symlinks
+          for lib in SDL3 fontconfig freetype png16 dbus-1 wayland-client X11 z; do
+            found=$(find /usr/lib/aarch64-linux-gnu -name "lib${lib}.so*" -type f 2>/dev/null | head -n 1)
+            if [ -n "$found" ]; then
+              sudo cp "$found" "$KONAN_ARM64_SYSROOT/lib/lib${lib}.so"
+              sudo rm -f "/usr/lib/aarch64-linux-gnu/lib${lib}.so"
+              sudo cp "$found" "/usr/lib/aarch64-linux-gnu/lib${lib}.so"
+            fi
+          done
+          
+          found_gl=$(find /usr/lib/aarch64-linux-gnu -name "libGL.so*" -type f 2>/dev/null | head -n 1)
+          if [ -n "$found_gl" ]; then
+            sudo cp "$found_gl" "$KONAN_ARM64_SYSROOT/lib/libGL.so"
+            sudo rm -f "/usr/lib/aarch64-linux-gnu/libGL.so"
+            sudo cp "$found_gl" "/usr/lib/aarch64-linux-gnu/libGL.so"
+          fi
+          
+          found_egl=$(find /usr/lib/aarch64-linux-gnu -name "libEGL.so*" -type f 2>/dev/null | head -n 1)
+          if [ -n "$found_egl" ]; then
+            sudo cp "$found_egl" "$KONAN_ARM64_SYSROOT/lib/libEGL.so"
+            sudo rm -f "/usr/lib/aarch64-linux-gnu/libEGL.so"
+            sudo cp "$found_egl" "/usr/lib/aarch64-linux-gnu/libEGL.so"
+          fi
+          
+          cd app
+          ./gradlew linkReleaseExecutableLinuxArm64
+          
+          cp build/bin/linuxArm64/releaseExecutable/app.kexe ../kapture-linux-arm64
+          cp ../kapture-linux-arm64 ../kapture-linux-arm64-upx
+          upx --best --lzma ../kapture-linux-arm64-upx
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64-artifacts
+          path: |
+            kapture-linux-arm64
+            kapture-linux-arm64-upx
+
+  build-windows-x64:
+    name: Build Windows x64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: 21
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openjdk-21-jdk zip upx
+
+      - name: Build Windows x64
+        run: |
+          cd app
+          ./gradlew linkReleaseExecutableMingwX64
+
+      - name: Package and Compress
+        run: |
+          mkdir -p bin/windows-package bin/windows-package-upx
+          
+          cp app/build/bin/mingwX64/releaseExecutable/app.exe bin/windows-package/kapture-windows-x64.exe
+          cp bin/windows-package/kapture-windows-x64.exe bin/windows-package-upx/kapture-windows-x64.exe
+          upx --best --lzma bin/windows-package-upx/kapture-windows-x64.exe
+          
+          SDL3_DLL=$(find app/build -name "SDL3.dll" | head -n 1)
+          KONAN_DIR="${KONAN_DATA_DIR:-$HOME/.konan}/dependencies/msys2-mingw-w64-x86_64-2/bin"
+          
+          for dir in bin/windows-package bin/windows-package-upx; do
+            if [ -n "$SDL3_DLL" ]; then
+              cp "$SDL3_DLL" "$dir/"
+            fi
+          
+            if [ -d "$KONAN_DIR" ]; then
+              cp "$KONAN_DIR/libstdc++-6.dll" "$dir/"
+              cp "$KONAN_DIR/libgcc_s_seh-1.dll" "$dir/"
+              cp "$KONAN_DIR/libwinpthread-1.dll" "$dir/"
+            fi
+
+            if [ -f "app/build/icudtl.dat" ]; then
+              cp app/build/icudtl.dat "$dir/"
+            else
+              wget -q https://repo1.maven.org/maven2/org/jetbrains/skiko/skiko-awt-runtime-windows-x64/0.8.24/skiko-awt-runtime-windows-x64-0.8.24.jar -O skiko-runtime.jar
+              unzip -p skiko-runtime.jar icudtl.dat > "$dir/icudtl.dat"
+            fi
+          done
+          
+          cd bin
+          zip -r kapture-windows-x64.zip windows-package/
+          zip -r kapture-windows-x64-upx.zip windows-package-upx/
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-artifacts
+          path: |
+            bin/kapture-windows-x64.zip
+            bin/kapture-windows-x64-upx.zip
+
+  release:
+    name: Release Binaries
+    needs: [build-linux-x64, build-linux-arm64, build-windows-x64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: bin
+          merge-multiple: true
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            bin/kapture-linux-x64
+            bin/kapture-linux-x64-upx
+            bin/kapture-linux-arm64
+            bin/kapture-linux-arm64-upx
+            bin/kapture-windows-x64.zip
+            bin/kapture-windows-x64-upx.zip

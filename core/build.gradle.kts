@@ -1,10 +1,13 @@
 @file:OptIn(ExperimentalWasmDsl::class)
 
+import com.android.build.api.dsl.androidLibrary
+import com.vanniktech.maven.publish.SonatypeHost
 import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
 
 plugins {
     alias(libs.plugins.multiplatform)
     alias(libs.plugins.android.library)
+    id("com.vanniktech.maven.publish") version "0.31.0"
 }
 
 group = "io.github.sakethpathike"
@@ -14,8 +17,12 @@ kotlin {
     jvmToolchain(17)
     applyDefaultHierarchyTemplate()
 
-    androidTarget()
     jvm()
+
+    androidLibrary {
+        namespace = "io.github.sakethpathike"
+        compileSdk = 36
+    }
 
     js {
         browser()
@@ -65,7 +72,7 @@ kotlin {
 
         val wasmJsMain by getting {
             dependencies {
-                implementation(libs.ktor.client.wasm.js)
+                implementation(libs.ktor.client.js)
             }
         }
 
@@ -89,16 +96,36 @@ kotlin {
     }
 }
 
-android {
-    namespace = "io.github.sakethpathike"
-    compileSdk = 36
+mavenPublishing {
+    publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL)
 
-    defaultConfig {
-        minSdk = 21
-    }
+    signAllPublications()
 
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
+    coordinates(group.toString(), "kapture", version.toString())
+
+    pom {
+        name = "kapture"
+        description = "Kotlin Multiplatform library for saving webpages as standalone HTML files with embedded assets."
+        inceptionYear = "2026"
+        url = "https://github.com/sakethpathike/kapture"
+        licenses {
+            license {
+                name = "The Apache License, Version 2.0"
+                url = "https://www.apache.org/licenses/LICENSE-2.0.txt"
+                distribution = "https://www.apache.org/licenses/LICENSE-2.0.txt"
+            }
+        }
+        developers {
+            developer {
+                id = "sakethpathike"
+                name = "Saketh Pathike"
+                url = "https://github.com/sakethpathike/"
+            }
+        }
+        scm {
+            url = "https://github.com/sakethpathike/kapture/"
+            connection = "scm:git:git://github.com/sakethpathike/kapture.git"
+            developerConnection = "scm:git:ssh://git@github.com/sakethpathike/kapture.git"
+        }
     }
 }
