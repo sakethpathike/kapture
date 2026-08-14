@@ -30,6 +30,7 @@ kotlin {
     iosSimulatorArm64()
     macosArm64()
     linuxX64()
+    linuxArm64()
     mingwX64()
 
     sourceSets {
@@ -39,6 +40,7 @@ kotlin {
                 implementation(libs.ktor.client.core)
                 implementation(libs.ksoup.network)
                 implementation(libs.tempfolder.sync)
+                implementation(project(":shared"))
             }
         }
 

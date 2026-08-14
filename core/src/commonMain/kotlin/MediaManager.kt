@@ -19,7 +19,7 @@ internal typealias FileName = String
 internal typealias MediaUrl = String
 
 internal class MediaManager(
-    private val document: Document, private val httpClient: HttpClient, private val options: Kapture.Options
+    private val document: Document, private val httpClient: HttpClient, private val options: Options
 ) {
     private val urls = mutableSetOf<String>()
     private val tempDirectory = createTempDirectory()

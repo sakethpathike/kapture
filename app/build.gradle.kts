@@ -21,6 +21,11 @@ kotlin {
             implementation("org.jetbrains.compose.ui:ui:1.12.0-rc01")
             implementation("org.jetbrains.compose.foundation:foundation:1.12.0-rc01")
             implementation("org.jetbrains.compose.material3:material3:1.12.0-alpha03")
+            implementation("io.sakethpathike.kapture:shared")
+        }
+
+        linuxX64Main.dependencies {
+            implementation("io.sakethpathike.kapture:core")
         }
 
         desktopNativeMain.dependencies {

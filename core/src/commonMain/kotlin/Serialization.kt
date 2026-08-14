@@ -12,7 +12,7 @@ private sealed interface WalkItem {
     data class WriteCloseTag(val tagName: String) : WalkItem
 }
 
-internal class Serialization(private val options: Kapture.Options) {
+internal class Serialization(private val options: Options) {
 
     fun writeBySerializing(document: Document, mediaFileMap: Map<MediaUrl, FileName>, destinationFile: RawSink) {
         val stack = ArrayDeque<WalkItem>()
