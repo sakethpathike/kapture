@@ -1,9 +1,13 @@
 package io.github.sakethpathike.kapture
 
 import com.fleeksoft.ksoup.nodes.*
-import kotlinx.io.*
+import io.ktor.utils.io.core.*
+import kotlinx.io.RawSink
+import kotlinx.io.buffered
 import kotlinx.io.files.Path
 import kotlinx.io.files.SystemFileSystem
+import kotlinx.io.readByteArray
+import kotlinx.io.readString
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 
@@ -49,21 +53,25 @@ internal class Serialization(private val options: Options) {
                         is Element -> {
                             val tag = node.tagName().lowercase()
 
-                            if (tag == "script" && !options.includeJs) continue
-                            if (tag == "noscript" && !options.includeJs) {
-                                val children = node.childNodes()
-                                for (i in children.indices.reversed()) {
-                                    stack.addLast(WalkItem.ProcessNode(children[i]))
+                            when (tag) {
+                                "script" -> if (!options.includeJs) continue
+                                "noscript" -> {
+                                    val children = node.childNodes()
+                                    for (i in children.indices.reversed()) {
+                                        stack.addLast(WalkItem.ProcessNode(children[i]))
+                                    }
+                                    continue
                                 }
-                                continue
+
+                                "style" -> if (!options.includeCss) continue
+                                "link" -> if (node.attr("rel").lowercase()
+                                        .contains("stylesheet") && !options.includeCss
+                                ) continue
+
+                                "img", "source", "picture" -> if (!options.includeImages) continue
+                                "video" -> if (!options.includeVideo) continue
+                                "audio", "track" -> if (!options.includeAudio) continue
                             }
-                            if (tag == "style" && !options.includeCss) continue
-                            if (tag == "link" && node.attr("rel").lowercase()
-                                    .contains("stylesheet") && !options.includeCss
-                            ) continue
-                            if (tag in setOf("img", "source", "picture") && !options.includeImages) continue
-                            if (tag == "video" && !options.includeVideo) continue
-                            if (tag in setOf("audio", "track") && !options.includeAudio) continue
 
                             if (tag == "script" || tag == "style") {
                                 writeOpenTag(element = node, destinationFile, mediaFileMap)
@@ -201,6 +209,8 @@ internal class Serialization(private val options: Options) {
         destinationFile.write(">")
     }
 
+    private val WHITESPACE_REGEX = Regex("\\s+")
+
     private fun writeSrcsetInline(
         srcset: String, baseUrl: String, destinationFile: RawSink, mediaFileMap: Map<String, String>
     ) {
@@ -210,7 +220,7 @@ internal class Serialization(private val options: Options) {
             if (index > 0) destinationFile.write(", ")
 
             val trimmedCandidate = candidate.trim()
-            val parts = trimmedCandidate.split(Regex("\\s+"))
+            val parts = trimmedCandidate.split(WHITESPACE_REGEX)
 
             if (parts.isEmpty() || parts[0].isEmpty()) {
                 destinationFile.write(trimmedCandidate)
@@ -259,30 +269,80 @@ internal class Serialization(private val options: Options) {
         return stringBuilder.toString()
     }
 
-    @OptIn(ExperimentalEncodingApi::class)
+    private val BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".toByteArray()
+
     private fun streamBase64(streamSize: Int, tempFileName: String, destinationFile: RawSink) {
-        // streamSize must be a multiple of 3 to prevent padding
-        // good stuff: https://stackoverflow.com/questions/4080988/why-does-base64-encoding-require-padding-if-the-input-length-is-not-divisible-by
-        require(streamSize % 3 == 0) {
-            "streamSize must be multiple of 3"
-        }
+        require(streamSize % 3 == 0 && streamSize > 0) { "streamSize must be a positive multiple of 3" }
 
         SystemFileSystem.source(tempFileName.toPath()).buffered().use { source ->
-            // we dont use .use here. we dont want to close the underlying destinationFile
             val sink = destinationFile.buffered()
 
-            while (source.request(streamSize.toLong())) {
-                val chunkBytes = source.readByteArray(streamSize)
-                sink.writeString(Base64.encode(chunkBytes))
-            }
+            val buffer = ByteArray(streamSize + 2)
+            var bufferLen = 0
 
-            val remainingBytes = source.readByteArray()
-            if (remainingBytes.isNotEmpty()) {
-                sink.writeString(Base64.encode(remainingBytes))
-            }
+            val outputBuffer = ByteArray((streamSize / 3 + 1) * 4)
 
+            while (true) {
+                val bytesRead = source.readAtMostTo(buffer, bufferLen, buffer.size)
+                if (bytesRead == -1) {
+                    if (bufferLen > 0) {
+                        val outLen = encodeBase64Final(buffer, bufferLen, outputBuffer)
+                        sink.write(outputBuffer, 0, outLen)
+                    }
+                    break
+                }
+
+                bufferLen += bytesRead
+
+                val bytesToEncode = (bufferLen / 3) * 3
+
+                if (bytesToEncode > 0) {
+                    val outLen = encodeBase64Chunk(buffer, bytesToEncode, outputBuffer)
+                    sink.write(outputBuffer, 0, outLen)
+
+                    val leftover = bufferLen - bytesToEncode
+                    if (leftover > 0) {
+                        buffer.copyInto(buffer, 0, bytesToEncode, bufferLen)
+                    }
+                    bufferLen = leftover
+                }
+            }
             sink.flush()
         }
+    }
+
+    private fun encodeBase64Chunk(input: ByteArray, len: Int, output: ByteArray): Int {
+        var outIdx = 0
+        for (i in 0 until len step 3) {
+            val b0 = input[i].toInt() and 0xFF
+            val b1 = input[i + 1].toInt() and 0xFF
+            val b2 = input[i + 2].toInt() and 0xFF
+
+            output[outIdx++] = BASE64_ALPHABET[b0 ushr 2]
+            output[outIdx++] = BASE64_ALPHABET[((b0 and 0x03) shl 4) or (b1 ushr 4)]
+            output[outIdx++] = BASE64_ALPHABET[((b1 and 0x0F) shl 2) or (b2 ushr 6)]
+            output[outIdx++] = BASE64_ALPHABET[b2 and 0x3F]
+        }
+        return outIdx
+    }
+
+    private fun encodeBase64Final(input: ByteArray, len: Int, output: ByteArray): Int {
+        var outIdx = 0
+        if (len == 1) {
+            val b0 = input[0].toInt() and 0xFF
+            output[outIdx++] = BASE64_ALPHABET[b0 ushr 2]
+            output[outIdx++] = BASE64_ALPHABET[(b0 and 0x03) shl 4]
+            output[outIdx++] = '='.code.toByte()
+            output[outIdx++] = '='.code.toByte()
+        } else if (len == 2) {
+            val b0 = input[0].toInt() and 0xFF
+            val b1 = input[1].toInt() and 0xFF
+            output[outIdx++] = BASE64_ALPHABET[b0 ushr 2]
+            output[outIdx++] = BASE64_ALPHABET[((b0 and 0x03) shl 4) or (b1 ushr 4)]
+            output[outIdx++] = BASE64_ALPHABET[(b1 and 0x0F) shl 2]
+            output[outIdx++] = '='.code.toByte()
+        }
+        return outIdx
     }
 
 
@@ -303,8 +363,7 @@ internal class Serialization(private val options: Options) {
                     val mime = getMimeType(absoluteUrl)
                     val bytes = SystemFileSystem.source(tempFile.toPath()).buffered().use { it.readByteArray() }
 
-                    @OptIn(ExperimentalEncodingApi::class)
-                    "url(${quote}data:$mime;base64,${Base64.encode(bytes)}$quote)"
+                    @OptIn(ExperimentalEncodingApi::class) "url(${quote}data:$mime;base64,${Base64.encode(bytes)}$quote)"
                 } else {
                     "url($quote$absoluteUrl$quote)"
                 }
