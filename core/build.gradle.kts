@@ -47,7 +47,6 @@ kotlin {
                 implementation(libs.ktor.client.core)
                 implementation(libs.ksoup.network)
                 implementation(libs.tempfolder.sync)
-                api(project(":shared"))
             }
         }
 

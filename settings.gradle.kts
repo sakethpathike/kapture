@@ -31,4 +31,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-include(":core", ":shared")
+
+include(":core")

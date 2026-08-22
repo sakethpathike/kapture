@@ -20,6 +20,5 @@ dependencyResolutionManagement {
 includeBuild("..") {
     dependencySubstitution {
         substitute(module("io.sakethpathike.kapture:core")).using(project(":core"))
-        substitute(module("io.sakethpathike.kapture:shared")).using(project(":shared"))
     }
 }
