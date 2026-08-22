@@ -11,7 +11,7 @@ kapture is available on Maven Central and supports `android`, `jvm`, `js`, `wasm
 In `build.gradle.kts`:
 
 ```
-implementation("io.github.sakethpathike:kapture:1.0.1")
+implementation("io.github.sakethpathike:kapture:1.0.2")
 ```
 
 Usage:
