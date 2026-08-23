@@ -11,7 +11,7 @@ plugins {
 }
 
 group = "io.github.sakethpathike"
-version = "1.0.2"
+version = "1.0.3"
 
 kotlin {
     jvmToolchain(17)
