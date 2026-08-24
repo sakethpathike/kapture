@@ -130,6 +130,16 @@ fun GUI() {
                             onCheckedChange = { options = options.copy(includeVideo = it) },
                         )
                         AssetStripOption(
+                            label = "Include Fonts",
+                            checked = options.includeFonts,
+                            onCheckedChange = { options = options.copy(includeFonts = it) },
+                        )
+                        AssetStripOption(
+                            label = "Include Metadata",
+                            checked = options.includeMetadata,
+                            onCheckedChange = { options = options.copy(includeMetadata = it) },
+                        )
+                        AssetStripOption(
                             label = "Execute JavaScript",
                             checked = options.includeJs,
                             onCheckedChange = { options = options.copy(includeJs = it) },
