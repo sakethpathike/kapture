@@ -39,6 +39,19 @@ internal val CSS_URL_REGEX = Regex(
     """url\(\s*(['"]?)([\s\S]*?)\1\s*\)""", RegexOption.IGNORE_CASE
 )
 
+internal val CSS_IMPORT_REGEX = Regex(
+    """@import\s+(?:url\(\s*(['"]?)([\s\S]*?)\1\s*\)|(['"])([\s\S]*?)\3)[^;]*;""", RegexOption.IGNORE_CASE
+)
+
+internal fun isFontMime(mime: String): Boolean {
+    val normalized = mime.lowercase().trim()
+    return normalized.startsWith("font/") ||
+            normalized.startsWith("application/x-font-") ||
+            normalized.startsWith("application/font-") ||
+            normalized.contains("fontobject") ||
+            normalized.contains("sfnt")
+}
+
 internal fun getMimeType(urlOrPath: String): String {
     val path = urlOrPath.substringBefore('?').substringBefore('#').substringAfterLast('/')
     val ext = path.substringAfterLast('.', "").lowercase()
@@ -79,6 +92,28 @@ internal fun getMimeType(urlOrPath: String): String {
         "wasm" -> "application/wasm"
         else -> "application/octet-stream"
     }
+}
+
+internal fun isFontUrl(url: String): Boolean {
+    return isFontMime(getMimeType(url))
+}
+
+internal val WHITESPACE_REGEX = Regex("\\s+")
+
+internal fun shouldDownloadResourceByMime(mime: String, options: Options): Boolean {
+    val normalized = mime.lowercase()
+    return when {
+        isFontMime(normalized) -> options.includeFonts
+        normalized.startsWith("image/") -> options.includeImages
+        normalized.startsWith("audio/") -> options.includeAudio
+        normalized.startsWith("video/") -> options.includeVideo
+        normalized == "text/css" -> options.includeCss
+        else -> true
+    }
+}
+
+internal fun shouldDownloadCssResource(url: String, options: Options): Boolean {
+    return shouldDownloadResourceByMime(getMimeType(url), options)
 }
 
 internal const val INIT_REQUIRED_MSG = "Kapture must be initialized, call Kapture#init before archiving"

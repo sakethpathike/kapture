@@ -39,6 +39,9 @@ object Kapture {
     }
 
     suspend fun archive(url: String, destinationFilePath: String) {
+        val currentOptions = options ?: error(INIT_REQUIRED_MSG)
+        val currentClient = client ?: error(INIT_REQUIRED_MSG)
+
         val destinationFile = SystemFileSystem.sink(Path(destinationFilePath))
 
         try {
@@ -52,8 +55,14 @@ object Kapture {
             val isHtml = contentType.contains("html") || contentType.contains("xhtml") || contentType.contains("xml")
 
             if (!isHtml) {
-                val bytes = response.readRawBytes()
                 val mime = contentType.substringBefore(";").trim().ifEmpty { getMimeType(url) }
+
+                if (isFontMime(mime) && !currentOptions.includeFonts) {
+                    destinationFile.write("")
+                    return
+                }
+
+                val bytes = response.readRawBytes()
 
                 @OptIn(ExperimentalEncodingApi::class) val base64 = Base64.encode(bytes)
 
@@ -68,8 +77,26 @@ object Kapture {
                 val closeTag = tag.substringBefore(" ")
 
                 val syntheticHtml = buildString {
-                    append("<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body>")
-                    append("<$tag src=\"data:$mime;base64,$base64\"></$closeTag>")
+                    append("<!DOCTYPE html><html><head><meta charset=\"UTF-8\"></head><body>")
+
+                    when (closeTag) {
+                        "img" -> {
+                            append("<img src=\"data:$mime;base64,$base64\">")
+                        }
+
+                        "embed" -> {
+                            append("<embed src=\"data:$mime;base64,$base64\">")
+                        }
+
+                        "iframe" -> {
+                            append("<iframe src=\"data:$mime;base64,$base64\" style=\"width:100%;height:100vh;\"></iframe>")
+                        }
+
+                        else -> {
+                            append("<$tag src=\"data:$mime;base64,$base64\"></$closeTag>")
+                        }
+                    }
+
                     append("</body></html>")
                 }
 
@@ -82,14 +109,16 @@ object Kapture {
             ksoupDoc.setBaseUri(url)
 
             val mediaManager = MediaManager(
-                document = ksoupDoc,
-                httpClient = client ?: error(INIT_REQUIRED_MSG),
-                options = options ?: error(INIT_REQUIRED_MSG)
+                document = ksoupDoc, httpClient = currentClient, options = currentOptions
             )
+
             try {
-                val mediaFileMap = mediaManager.downloadMediaToTempFiles()
-                Serialization(options = options ?: error(INIT_REQUIRED_MSG)).writeBySerializing(
-                    document = ksoupDoc, mediaFileMap = mediaFileMap, destinationFile = destinationFile
+                val mediaResult = mediaManager.downloadMediaToTempFiles()
+                Serialization(options = currentOptions).writeBySerializing(
+                    document = ksoupDoc,
+                    mediaFileMap = mediaResult.files,
+                    mimeMap = mediaResult.mimes,
+                    destinationFile = destinationFile
                 )
             } finally {
                 mediaManager.cleanup()

@@ -18,7 +18,12 @@ private sealed interface WalkItem {
 
 internal class Serialization(private val options: Options) {
 
-    fun writeBySerializing(document: Document, mediaFileMap: Map<MediaUrl, FileName>, destinationFile: RawSink) {
+    fun writeBySerializing(
+        document: Document,
+        mediaFileMap: Map<MediaUrl, FileName>,
+        mimeMap: Map<MediaUrl, String>,
+        destinationFile: RawSink
+    ) {
         val stack = ArrayDeque<WalkItem>()
         stack.addLast(WalkItem.ProcessNode(document))
 
@@ -54,7 +59,11 @@ internal class Serialization(private val options: Options) {
                             val tag = node.tagName().lowercase()
 
                             when (tag) {
-                                "script" -> if (!options.includeJs) continue
+                                "script" -> {
+                                    if (!options.includeJs) continue
+                                    if (!options.includeMetadata && isMetadataScript(node)) continue
+                                }
+
                                 "noscript" -> {
                                     val children = node.childNodes()
                                     for (i in children.indices.reversed()) {
@@ -63,31 +72,64 @@ internal class Serialization(private val options: Options) {
                                     continue
                                 }
 
-                                "style" -> if (!options.includeCss) continue
-                                "link" -> if (node.attr("rel").lowercase()
-                                        .contains("stylesheet") && !options.includeCss
-                                ) continue
+                                "style" -> {
+                                    if (!options.includeCss) continue
+                                }
 
-                                "img", "source", "picture" -> if (!options.includeImages) continue
-                                "video" -> if (!options.includeVideo) continue
-                                "audio", "track" -> if (!options.includeAudio) continue
+                                "link" -> {
+                                    if (isFontLink(node)) continue
+                                    if (!options.includeMetadata && isMetadataLink(node)) continue
+
+                                    val rel = node.attr("rel").lowercase()
+                                    if (rel.contains("stylesheet") && !options.includeCss) continue
+                                }
+
+                                "meta" -> {
+                                    if (!options.includeMetadata && isRemovableMetadata(node)) continue
+                                }
+
+                                "img", "source", "picture" -> {
+                                    if (!options.includeImages) continue
+                                }
+
+                                "video" -> {
+                                    if (!options.includeVideo) continue
+                                }
+
+                                "audio", "track" -> {
+                                    if (!options.includeAudio) continue
+                                }
                             }
 
                             if (tag == "script" || tag == "style") {
-                                writeOpenTag(element = node, destinationFile, mediaFileMap)
-                                val rawData = node.data()
+                                writeOpenTag(
+                                    element = node,
+                                    destinationFile = destinationFile,
+                                    mediaFileMap = mediaFileMap,
+                                    mimeMap = mimeMap
+                                )
+                                val rawData = node.childNodes().filterIsInstance<DataNode>().joinToString("") { it.getWholeData() }
                                 if (tag == "style") {
-                                    val processedCss = processCss(rawData, node.baseUri(), mediaFileMap)
+                                    val processedCss = processCss(rawData, node.baseUri(), mediaFileMap, mimeMap)
                                     destinationFile.write(processedCss)
                                 } else {
-                                    val safeJs = rawData.replace("</script>", "<\\/script>", ignoreCase = true)
+                                    val safeJs = rawData.replace(
+                                        "</script>", "<\\/script>", ignoreCase = true
+                                    )
                                     destinationFile.write(safeJs)
                                 }
                                 destinationFile.write("</$tag>")
                                 continue
                             }
 
-                            writeOpenTag(element = node, destinationFile, mediaFileMap)
+
+                            writeOpenTag(
+                                element = node,
+                                destinationFile = destinationFile,
+                                mediaFileMap = mediaFileMap,
+                                mimeMap = mimeMap
+                            )
+
                             if (tag !in voidElements) {
                                 stack.addLast(WalkItem.WriteCloseTag(node.tagName()))
                                 val children = node.childNodes()
@@ -136,10 +178,17 @@ internal class Serialization(private val options: Options) {
         destinationFile.flush()
     }
 
+    private fun isFontLink(element: Element): Boolean {
+        val rel = element.attr("rel").lowercase()
+        val asAttr = element.attr("as").lowercase()
+        if (asAttr == "font") return true
+        if (rel.contains("font")) return true
+        val href = element.absUrl("href").ifEmpty { element.attr("href") }
+        return isFontUrl(href)
+    }
+
     private fun writeOpenTag(
-        element: Element,
-        destinationFile: RawSink,
-        mediaFileMap: Map<String, String>,
+        element: Element, destinationFile: RawSink, mediaFileMap: Map<String, String>, mimeMap: Map<String, String>
     ) {
         val tagName = element.tagName().lowercase()
 
@@ -151,7 +200,7 @@ internal class Serialization(private val options: Options) {
                 val cssFilePath = mediaFileMap[href]
                 if (cssFilePath != null) {
                     val rawCss = SystemFileSystem.source(Path(cssFilePath)).buffered().use { it.readString() }
-                    val processedCss = processCss(rawCss, element.baseUri(), mediaFileMap)
+                    val processedCss = processCss(rawCss, href, mediaFileMap, mimeMap)
                     destinationFile.write("<style>$processedCss</style>")
                     return
                 }
@@ -159,8 +208,10 @@ internal class Serialization(private val options: Options) {
 
             if (rel.contains("icon") || rel.contains("shortcut icon")) {
                 val tempFile = mediaFileMap[href]
+
                 if (tempFile != null) {
-                    val mime = getMimeType(href)
+                    val mime = mimeMap[href] ?: getMimeType(href)
+
                     destinationFile.write("<link rel=\"$rel\" href=\"data:$mime;base64,")
                     streamBase64(options.base64StreamSize, tempFile, destinationFile)
                     destinationFile.write("\">")
@@ -177,13 +228,19 @@ internal class Serialization(private val options: Options) {
 
             if (attrName.equals("srcset", ignoreCase = true)) {
                 destinationFile.write(" srcset=\"")
-                writeSrcsetInline(attrValue, element.baseUri(), destinationFile, mediaFileMap)
+                writeSrcsetInline(
+                    srcset = attrValue,
+                    baseUrl = element.baseUri(),
+                    destinationFile = destinationFile,
+                    mediaFileMap = mediaFileMap,
+                    mimeMap = mimeMap
+                )
                 destinationFile.write("\"")
                 return@forEach
             }
 
             if (attrName.equals("style", ignoreCase = true)) {
-                val processedStyle = processCss(attrValue, element.baseUri(), mediaFileMap)
+                val processedStyle = processCss(attrValue, element.baseUri(), mediaFileMap, mimeMap)
                 destinationFile.write(" style=\"${escapeHtml(processedStyle)}\"")
                 return@forEach
             }
@@ -197,7 +254,8 @@ internal class Serialization(private val options: Options) {
             val tempFileName = mediaFileMap[resolvedUrl] ?: mediaFileMap[attrValue]
 
             if (tempFileName != null) {
-                val mime = getMimeType(resolvedUrl)
+                val mime = mimeMap[resolvedUrl] ?: mimeMap[attrValue] ?: getMimeType(resolvedUrl)
+
                 destinationFile.write(" $attrName=\"data:$mime;base64,")
                 streamBase64(options.base64StreamSize, tempFileName, destinationFile)
                 destinationFile.write("\"")
@@ -209,10 +267,13 @@ internal class Serialization(private val options: Options) {
         destinationFile.write(">")
     }
 
-    private val WHITESPACE_REGEX = Regex("\\s+")
 
     private fun writeSrcsetInline(
-        srcset: String, baseUrl: String, destinationFile: RawSink, mediaFileMap: Map<String, String>
+        srcset: String,
+        baseUrl: String,
+        destinationFile: RawSink,
+        mediaFileMap: Map<String, String>,
+        mimeMap: Map<String, String>
     ) {
         val candidates = srcset.split(",")
 
@@ -239,19 +300,50 @@ internal class Serialization(private val options: Options) {
             val tempFileName = mediaFileMap[absoluteUrl] ?: mediaFileMap[rawUrl]
 
             if (tempFileName != null) {
-                val mime = getMimeType(absoluteUrl)
+                val mime = mimeMap[absoluteUrl] ?: mimeMap[rawUrl] ?: getMimeType(absoluteUrl)
+
                 destinationFile.write("data:$mime;base64,")
                 streamBase64(options.base64StreamSize, tempFileName, destinationFile)
+
                 if (descriptor.isNotEmpty()) {
                     destinationFile.write(" $descriptor")
                 }
             } else {
                 destinationFile.write(absoluteUrl)
+
                 if (descriptor.isNotEmpty()) {
                     destinationFile.write(" $descriptor")
                 }
             }
         }
+    }
+
+    private fun isMetadataScript(element: Element): Boolean {
+        return element.attr("type").lowercase().trim() == "application/ld+json"
+    }
+
+    private fun isMetadataLink(element: Element): Boolean {
+        val rel = element.attr("rel").lowercase()
+        return rel.contains("canonical") || rel.contains("alternate") || rel.contains("author") || rel.contains("prev") || rel.contains(
+            "next"
+        )
+    }
+
+    private fun isRemovableMetadata(element: Element): Boolean {
+        if (element.hasAttr("charset")) return false
+
+        val httpEquiv = element.attr("http-equiv").lowercase().trim()
+        if (httpEquiv == "content-type") return false
+
+        val name = element.attr("name").lowercase().trim()
+
+        // functional meta tags that usually affect rendering
+        if (name == "viewport" || name == "color-scheme") return false
+
+        val property = element.attr("property").lowercase().trim()
+        val itemprop = element.attr("itemprop").lowercase().trim()
+
+        return name.isNotEmpty() || property.isNotEmpty() || itemprop.isNotEmpty() || httpEquiv.isNotEmpty()
     }
 
     private fun escapeHtml(input: String): String {
@@ -345,27 +437,32 @@ internal class Serialization(private val options: Options) {
         return outIdx
     }
 
-
+    // TODO:
+    // this function still returns a String, and CSS url(...) base64 inlining reads the whole resource into memory
+    // for normal fonts this is fine. for huge fonts or huge background images, it can spike memory
+    // if we want truly low memory there, processCss needs to become a streaming CSS writer into RawSink
     private fun processCss(
-        cssText: String, baseUrl: String, mediaFileMap: Map<String, String>
+        cssText: String, baseUrl: String, mediaFileMap: Map<String, String>, mimeMap: Map<String, String>
     ): String {
         return CSS_URL_REGEX.replace(cssText) { matchResult ->
             val quote = matchResult.groupValues[1]
             val originalUrl = matchResult.groupValues[2].trim()
-
             if (originalUrl.isEmpty() || isNonResolvableUrl(originalUrl)) {
                 matchResult.value
             } else {
                 val absoluteUrl = resolveUrl(baseUrl, originalUrl)
-                val tempFile = mediaFileMap[absoluteUrl] ?: mediaFileMap[originalUrl]
-
-                if (tempFile != null) {
-                    val mime = getMimeType(absoluteUrl)
-                    val bytes = SystemFileSystem.source(tempFile.toPath()).buffered().use { it.readByteArray() }
-
-                    @OptIn(ExperimentalEncodingApi::class) "url(${quote}data:$mime;base64,${Base64.encode(bytes)}$quote)"
-                } else {
+                if (!shouldDownloadCssResource(absoluteUrl, options)) {
                     "url($quote$absoluteUrl$quote)"
+                } else {
+                    val tempFile = mediaFileMap[absoluteUrl] ?: mediaFileMap[originalUrl]
+                    if (tempFile != null) {
+                        val mime = mimeMap[absoluteUrl] ?: mimeMap[originalUrl] ?: getMimeType(absoluteUrl)
+                        val bytes = SystemFileSystem.source(tempFile.toPath()).buffered().use { it.readByteArray() }
+                        @OptIn(ExperimentalEncodingApi::class)
+                        "url(${quote}data:$mime;base64,${Base64.encode(bytes)}$quote)"
+                    } else {
+                        "url($quote$absoluteUrl$quote)"
+                    }
                 }
             }
         }
