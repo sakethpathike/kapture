@@ -22,6 +22,12 @@ kotlin {
     androidLibrary {
         namespace = "io.github.sakethpathike"
         compileSdk = 36
+        minSdk = 21
+        optimization {
+            consumerKeepRules.publish = true
+            val proguardFile = File(projectDir, "proguard-rules.pro")
+            consumerKeepRules.files.add(proguardFile)
+        }
     }
 
     js {
