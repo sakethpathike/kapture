@@ -20,7 +20,7 @@ kotlin {
 
     android {
         namespace = "io.github.sakethpathike"
-        compileSdk = 36
+        compileSdk = 37
         minSdk = 21
         optimization {
             consumerKeepRules.publish = true
