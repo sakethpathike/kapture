@@ -6,10 +6,6 @@ import kotlinx.io.RawSink
 import kotlinx.io.buffered
 import kotlinx.io.files.Path
 import kotlinx.io.files.SystemFileSystem
-import kotlinx.io.readByteArray
-import kotlinx.io.readString
-import kotlin.io.encoding.Base64
-import kotlin.io.encoding.ExperimentalEncodingApi
 
 private sealed interface WalkItem {
     data class ProcessNode(val node: Node) : WalkItem
@@ -110,9 +106,18 @@ internal class Serialization(private val options: Options) {
                                 )
                                 val rawData = node.childNodes().filterIsInstance<DataNode>().joinToString("") { it.getWholeData() }
                                 if (tag == "style") {
-                                    val processedCss = processCss(rawData, node.baseUri(), mediaFileMap, mimeMap)
-                                    destinationFile.write(processedCss)
-                                } else {
+                                    val cssStrings = node.childNodes()
+                                        .filterIsInstance<DataNode>()
+                                        .map { it.getWholeData() }
+
+                                    processCssToSink(
+                                        reader = StringCssByteReader(cssStrings),
+                                        baseUrl = node.baseUri(),
+                                        destinationFile = destinationFile,
+                                        mediaFileMap = mediaFileMap,
+                                        mimeMap = mimeMap
+                                    )
+                                }else {
                                     val safeJs = rawData.replace(
                                         "</script>", "<\\/script>", ignoreCase = true
                                     )
@@ -199,9 +204,45 @@ internal class Serialization(private val options: Options) {
             if (rel.contains("stylesheet")) {
                 val cssFilePath = mediaFileMap[href]
                 if (cssFilePath != null) {
-                    val rawCss = SystemFileSystem.source(Path(cssFilePath)).buffered().use { it.readString() }
-                    val processedCss = processCss(rawCss, href, mediaFileMap, mimeMap)
-                    destinationFile.write("<style>$processedCss</style>")
+                    destinationFile.write("<style>")
+
+                    SystemFileSystem.source(Path(cssFilePath)).buffered().use { cssSource ->
+                        val reader = object : CssByteReader() {
+                            private val buffer = ByteArray(8192)
+                            private var pos = 0
+                            private var limit = 0
+                            private var eof = false
+
+                            override fun readNext(): Int {
+                                if (pos >= limit) {
+                                    if (eof) return -1
+
+                                    val bytesRead = cssSource.readAtMostTo(buffer, 0, buffer.size)
+                                    if (bytesRead == -1) {
+                                        eof = true
+                                        return -1
+                                    }
+
+                                    pos = 0
+                                    limit = bytesRead
+                                }
+
+                                val value = buffer[pos].toInt() and 0xFF
+                                pos += 1
+                                return value
+                            }
+                        }
+
+                        processCssToSink(
+                            reader = reader,
+                            baseUrl = href,
+                            destinationFile = destinationFile,
+                            mediaFileMap = mediaFileMap,
+                            mimeMap = mimeMap
+                        )
+                    }
+
+                    destinationFile.write("</style>")
                     return
                 }
             }
@@ -240,8 +281,18 @@ internal class Serialization(private val options: Options) {
             }
 
             if (attrName.equals("style", ignoreCase = true)) {
-                val processedStyle = processCss(attrValue, element.baseUri(), mediaFileMap, mimeMap)
-                destinationFile.write(" style=\"${escapeHtml(processedStyle)}\"")
+                destinationFile.write(" style=\"")
+
+                processCssToSink(
+                    reader = StringCssByteReader(listOf(attrValue)),
+                    baseUrl = element.baseUri(),
+                    destinationFile = destinationFile,
+                    mediaFileMap = mediaFileMap,
+                    mimeMap = mimeMap,
+                    escapeHtmlOutput = true
+                )
+
+                destinationFile.write("\"")
                 return@forEach
             }
 
@@ -437,34 +488,415 @@ internal class Serialization(private val options: Options) {
         return outIdx
     }
 
-    // TODO:
-    // this function still returns a String, and CSS url(...) base64 inlining reads the whole resource into memory
-    // for normal fonts this is fine. for huge fonts or huge background images, it can spike memory
-    // if we want truly low memory there, processCss needs to become a streaming CSS writer into RawSink
-    private fun processCss(
-        cssText: String, baseUrl: String, mediaFileMap: Map<String, String>, mimeMap: Map<String, String>
-    ): String {
-        return CSS_URL_REGEX.replace(cssText) { matchResult ->
-            val quote = matchResult.groupValues[1]
-            val originalUrl = matchResult.groupValues[2].trim()
-            if (originalUrl.isEmpty() || isNonResolvableUrl(originalUrl)) {
-                matchResult.value
-            } else {
-                val absoluteUrl = resolveUrl(baseUrl, originalUrl)
-                if (!shouldDownloadCssResource(absoluteUrl, options)) {
-                    "url($quote$absoluteUrl$quote)"
-                } else {
-                    val tempFile = mediaFileMap[absoluteUrl] ?: mediaFileMap[originalUrl]
-                    if (tempFile != null) {
-                        val mime = mimeMap[absoluteUrl] ?: mimeMap[originalUrl] ?: getMimeType(absoluteUrl)
-                        val bytes = SystemFileSystem.source(tempFile.toPath()).buffered().use { it.readByteArray() }
-                        @OptIn(ExperimentalEncodingApi::class)
-                        "url(${quote}data:$mime;base64,${Base64.encode(bytes)}$quote)"
-                    } else {
-                        "url($quote$absoluteUrl$quote)"
-                    }
+    private val MAX_CSS_URL_CAPTURE_BYTES = 16384
+
+    private val HTML_AMP = "&amp;".encodeToByteArray()
+    private val HTML_LT = "&lt;".encodeToByteArray()
+    private val HTML_GT = "&gt;".encodeToByteArray()
+    private val HTML_QUOT = "&quot;".encodeToByteArray()
+    private val HTML_APOS = "&#x27;".encodeToByteArray()
+
+    private interface CssOutput {
+        fun writeByte(b: Int)
+        fun writeBytes(bytes: ByteArray, start: Int, end: Int)
+        fun writeString(value: String)
+        fun flushAll()
+    }
+
+    private abstract class CssByteReader {
+        private val pushback = IntArray(32)
+        private var pushCount = 0
+
+        fun read(): Int {
+            if (pushCount > 0) {
+                pushCount -= 1
+                return pushback[pushCount]
+            }
+            return readNext()
+        }
+
+        fun unread(b: Int) {
+            if (b == -1) return
+            if (pushCount == pushback.size) {
+                error("CSS byte reader pushback overflow")
+            }
+            pushback[pushCount] = b
+            pushCount += 1
+        }
+
+        protected abstract fun readNext(): Int
+    }
+
+    private class StringCssByteReader(
+        strings: Iterable<String>
+    ) : CssByteReader() {
+        private val iterator = strings.iterator()
+        private var current: ByteArray? = null
+        private var pos = 0
+
+        override fun readNext(): Int {
+            while (true) {
+                val array = current
+                if (array != null && pos < array.size) {
+                    val value = array[pos].toInt() and 0xFF
+                    pos += 1
+                    return value
+                }
+
+                if (!iterator.hasNext()) return -1
+
+                current = iterator.next().encodeToByteArray()
+                pos = 0
+            }
+        }
+    }
+
+    private class ByteCollector {
+        var bytes = ByteArray(256)
+            private set
+        var size = 0
+            private set
+
+        fun add(b: Int) {
+            if (size == bytes.size) {
+                bytes = bytes.copyOf(bytes.size * 2)
+            }
+            bytes[size] = b.toByte()
+            size += 1
+        }
+
+        fun toUtf8String(): String {
+            return bytes.copyOf(size).decodeToString()
+        }
+    }
+
+    private fun isCssWhitespaceByte(b: Int): Boolean {
+        return b == 0x20 || b == 0x09 || b == 0x0A || b == 0x0D || b == 0x0C
+    }
+
+    private fun skipCssWhitespace(reader: CssByteReader): Int {
+        var b = reader.read()
+        while (b != -1 && isCssWhitespaceByte(b)) {
+            b = reader.read()
+        }
+        return b
+    }
+    private fun processCssToSink(
+        reader: CssByteReader,
+        baseUrl: String,
+        destinationFile: RawSink,
+        mediaFileMap: Map<MediaUrl, FileName>,
+        mimeMap: Map<MediaUrl, String>,
+        escapeHtmlOutput: Boolean = false
+    ) {
+        val sink = destinationFile.buffered()
+
+        val out = object : CssOutput {
+            private val buffer = ByteArray(8192)
+            private var pos = 0
+
+            override fun writeByte(b: Int) {
+                if (pos == buffer.size) flushBuffer()
+                buffer[pos] = b.toByte()
+                pos += 1
+            }
+
+            override fun writeBytes(bytes: ByteArray, start: Int, end: Int) {
+                var currentStart = start
+                var remaining = end - start
+
+                while (remaining > 0) {
+                    if (pos == buffer.size) flushBuffer()
+
+                    val toCopy = minOf(remaining, buffer.size - pos)
+                    bytes.copyInto(
+                        destination = buffer,
+                        destinationOffset = pos,
+                        startIndex = currentStart,
+                        endIndex = currentStart + toCopy
+                    )
+
+                    pos += toCopy
+                    currentStart += toCopy
+                    remaining -= toCopy
                 }
             }
+
+            override fun writeString(value: String) {
+                val bytes = value.encodeToByteArray()
+                writeBytes(bytes, 0, bytes.size)
+            }
+
+            override fun flushAll() {
+                flushBuffer()
+                sink.flush()
+            }
+
+            private fun flushBuffer() {
+                if (pos > 0) {
+                    sink.write(buffer, 0, pos)
+                    pos = 0
+                }
+            }
+        }
+
+        while (true) {
+            val b = reader.read()
+            if (b == -1) break
+
+            if (b == 'u'.code || b == 'U'.code) {
+                val r = reader.read()
+                val l = reader.read()
+                val p = reader.read()
+
+                if (
+                    (r == 'r'.code || r == 'R'.code) &&
+                    (l == 'l'.code || l == 'L'.code) &&
+                    p == '('.code
+                ) {
+                    processCssUrlToken(
+                        reader = reader,
+                        baseUrl = baseUrl,
+                        out = out,
+                        destinationFile = destinationFile,
+                        mediaFileMap = mediaFileMap,
+                        mimeMap = mimeMap,
+                        escapeHtmlOutput = escapeHtmlOutput
+                    )
+                } else {
+                    writeMaybeEscapeByte(out, b, escapeHtmlOutput)
+                    reader.unread(p)
+                    reader.unread(l)
+                    reader.unread(r)
+                }
+            } else {
+                writeMaybeEscapeByte(out, b, escapeHtmlOutput)
+            }
+        }
+
+        out.flushAll()
+    }
+    private fun processCssUrlToken(
+        reader: CssByteReader,
+        baseUrl: String,
+        out: CssOutput,
+        destinationFile: RawSink,
+        mediaFileMap: Map<MediaUrl, FileName>,
+        mimeMap: Map<MediaUrl, String>,
+        escapeHtmlOutput: Boolean
+    ) {
+        val first = skipCssWhitespace(reader)
+        if (first == -1) {
+            writeMaybeEscapeString(out, "url(", escapeHtmlOutput)
+            return
+        }
+
+        val quote = if (first == '"'.code || first == '\''.code) first else 0
+        val quoteString = when (quote) {
+            '"'.code -> "\""
+            '\''.code -> "'"
+            else -> ""
+        }
+
+        val collector = ByteCollector()
+        var overflow = false
+
+        fun addByte(byte: Int) {
+            if (overflow) {
+                writeMaybeEscapeByte(out, byte, escapeHtmlOutput)
+                return
+            }
+
+            if (collector.size >= MAX_CSS_URL_CAPTURE_BYTES) {
+                overflow = true
+                writeMaybeEscapeString(out, "url(", escapeHtmlOutput)
+                if (quoteString.isNotEmpty()) {
+                    writeMaybeEscapeString(out, quoteString, escapeHtmlOutput)
+                }
+                writeCapturedBytes(out, collector, escapeHtmlOutput)
+                writeMaybeEscapeByte(out, byte, escapeHtmlOutput)
+                return
+            }
+
+            collector.add(byte)
+        }
+
+        var closed = false
+
+        if (quote != 0) {
+            var escapeNext = false
+
+            while (true) {
+                val b = reader.read()
+                if (b == -1) break
+
+                if (escapeNext) {
+                    addByte(b)
+                    escapeNext = false
+                    continue
+                }
+
+                if (b == '\\'.code) {
+                    addByte(b)
+                    escapeNext = true
+                    continue
+                }
+
+                if (b == quote) {
+                    closed = true
+                    break
+                }
+
+                addByte(b)
+            }
+
+            val after = skipCssWhitespace(reader)
+            if (after != ')'.code && after != -1) {
+                reader.unread(after)
+            }
+        } else {
+            var current = first
+
+            while (true) {
+                if (current == -1) break
+
+                if (current == ')'.code) {
+                    closed = true
+                    break
+                }
+
+                if (isCssWhitespaceByte(current)) {
+                    var next = reader.read()
+                    while (next != -1 && isCssWhitespaceByte(next)) {
+                        next = reader.read()
+                    }
+
+                    if (next == ')'.code) {
+                        closed = true
+                    } else if (next != -1) {
+                        reader.unread(next)
+                    }
+                    break
+                }
+
+                addByte(current)
+                current = reader.read()
+            }
+        }
+
+        if (overflow) {
+            if (quote != 0 && closed) {
+                writeMaybeEscapeString(out, quoteString, escapeHtmlOutput)
+            }
+            writeMaybeEscapeString(out, ")", escapeHtmlOutput)
+            return
+        }
+
+        val originalUrl = collector.toUtf8String().trim()
+
+        if (originalUrl.isEmpty() || isNonResolvableUrl(originalUrl)) {
+            writeMaybeEscapeString(
+                out = out,
+                value = "url($quoteString$originalUrl$quoteString)",
+                escapeHtmlOutput = escapeHtmlOutput
+            )
+            return
+        }
+
+        val absoluteUrl = resolveUrl(baseUrl, originalUrl)
+
+        if (!shouldDownloadCssResource(absoluteUrl, options)) {
+            writeMaybeEscapeString(
+                out = out,
+                value = "url($quoteString$absoluteUrl$quoteString)",
+                escapeHtmlOutput = escapeHtmlOutput
+            )
+            return
+        }
+
+        val tempFile = mediaFileMap[absoluteUrl] ?: mediaFileMap[originalUrl]
+        if (tempFile == null) {
+            writeMaybeEscapeString(
+                out = out,
+                value = "url($quoteString$absoluteUrl$quoteString)",
+                escapeHtmlOutput = escapeHtmlOutput
+            )
+            return
+        }
+
+        val mime = mimeMap[absoluteUrl] ?: mimeMap[originalUrl] ?: getMimeType(absoluteUrl)
+
+        writeMaybeEscapeString(out, "url(", escapeHtmlOutput)
+        if (quoteString.isNotEmpty()) {
+            writeMaybeEscapeString(out, quoteString, escapeHtmlOutput)
+        }
+        writeMaybeEscapeString(out, "data:$mime;base64,", escapeHtmlOutput)
+
+        out.flushAll()
+        streamBase64(
+            streamSize = options.base64StreamSize,
+            tempFileName = tempFile,
+            destinationFile = destinationFile
+        )
+
+        if (quoteString.isNotEmpty()) {
+            writeMaybeEscapeString(out, quoteString, escapeHtmlOutput)
+        }
+        writeMaybeEscapeString(out, ")", escapeHtmlOutput)
+    }
+    private fun writeMaybeEscapeByte(
+        out: CssOutput,
+        b: Int,
+        escapeHtmlOutput: Boolean
+    ) {
+        if (!escapeHtmlOutput) {
+            out.writeByte(b)
+            return
+        }
+
+        when (b) {
+            '&'.code -> out.writeBytes(HTML_AMP, 0, HTML_AMP.size)
+            '<'.code -> out.writeBytes(HTML_LT, 0, HTML_LT.size)
+            '>'.code -> out.writeBytes(HTML_GT, 0, HTML_GT.size)
+            '"'.code -> out.writeBytes(HTML_QUOT, 0, HTML_QUOT.size)
+            '\''.code -> out.writeBytes(HTML_APOS, 0, HTML_APOS.size)
+            else -> out.writeByte(b)
+        }
+    }
+
+    private fun writeMaybeEscapeString(
+        out: CssOutput,
+        value: String,
+        escapeHtmlOutput: Boolean
+    ) {
+        if (!escapeHtmlOutput) {
+            out.writeString(value)
+            return
+        }
+
+        val bytes = value.encodeToByteArray()
+        for (byte in bytes) {
+            writeMaybeEscapeByte(out, byte.toInt() and 0xFF, true)
+        }
+    }
+
+    private fun writeCapturedBytes(
+        out: CssOutput,
+        collector: ByteCollector,
+        escapeHtmlOutput: Boolean
+    ) {
+        if (collector.size == 0) return
+
+        if (escapeHtmlOutput) {
+            for (i in 0 until collector.size) {
+                writeMaybeEscapeByte(
+                    out = out,
+                    b = collector.bytes[i].toInt() and 0xFF,
+                    escapeHtmlOutput = true
+                )
+            }
+        } else {
+            out.writeBytes(collector.bytes, 0, collector.size)
         }
     }
 
