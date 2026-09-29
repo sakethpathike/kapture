@@ -2,9 +2,9 @@ import java.net.URI
 import java.util.zip.ZipInputStream
 
 plugins {
-    kotlin("multiplatform") version "2.3.20"
-    id("org.jetbrains.kotlin.plugin.compose") version "2.3.20"
-    id("org.jetbrains.compose") version "1.12.0-rc01"
+    kotlin("multiplatform") version "2.4.20"
+    id("org.jetbrains.kotlin.plugin.compose") version "2.4.20"
+    id("org.jetbrains.compose") version "1.12.1"
     id("dev.brahmkshatriya.compose") version "1.12.10-alpha05"
 }
 
