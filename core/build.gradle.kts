@@ -1,6 +1,5 @@
 @file:OptIn(ExperimentalWasmDsl::class)
 
-import com.android.build.api.dsl.androidLibrary
 import com.vanniktech.maven.publish.SonatypeHost
 import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
 
@@ -19,7 +18,7 @@ kotlin {
 
     jvm()
 
-    androidLibrary {
+    android {
         namespace = "io.github.sakethpathike"
         compileSdk = 36
         minSdk = 21
@@ -135,16 +134,14 @@ mavenPublishing {
     }
 }
 
-// Ktor 3.5.2 pulls kotlin-stdlib 2.3.21, which breaks Wasm compilation against 2.3.0
-// Force it until we upgrade Kotlin
 allprojects {
     configurations.all {
         resolutionStrategy {
             force(
-                "org.jetbrains.kotlin:kotlin-stdlib:2.3.0",
-                "org.jetbrains.kotlin:kotlin-stdlib-wasm-js:2.3.0",
-                "org.jetbrains.kotlin:kotlin-stdlib-js:2.3.0",
-                "org.jetbrains.kotlin:kotlin-stdlib-common:2.3.0"
+                "org.jetbrains.kotlin:kotlin-stdlib:2.4.20",
+                "org.jetbrains.kotlin:kotlin-stdlib-wasm-js:2.4.20",
+                "org.jetbrains.kotlin:kotlin-stdlib-js:2.4.20",
+                "org.jetbrains.kotlin:kotlin-stdlib-common:2.4.20"
             )
         }
     }
